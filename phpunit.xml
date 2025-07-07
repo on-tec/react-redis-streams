@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.3/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <testsuites>
+        <testsuite name="Test Suite">
+            <directory suffix="Test.php">./tests</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory suffix=".php">./app</directory>
+            <directory suffix=".php">./src</directory>
+        </include>
+    </source>
+    <php>
+        <!-- XGROUP CREATE test my 0 MKSTREAM -->
+        <env name="URL" value="redis://:123456@192.168.0.2:6380" />
+        <env name="STREAM" value="test" />
+        <env name="GROUP" value="my" />
+        <env name="CONSUMER" value="me" />
+    </php>
+</phpunit>

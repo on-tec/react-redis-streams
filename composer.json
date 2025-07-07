@@ -1,0 +1,54 @@
+{
+    "name": "ontec/react-redis-streams",
+    "description": "Handles Redis streams safely & asynchronically.",
+    "type": "library",
+    "license": "LGPL-3.0-or-later",
+    "prefer-stable": true,
+    "autoload": {
+        "psr-4": {
+            "Ontec\\ReactRedisStreams\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Ontec\\ReactRedisStreams\\Tests\\": "tests/"
+        }
+    },
+    "authors": [
+        {
+            "name": "EligiusSantori",
+            "email": "mirrorimage@yandex.ru",
+            "homepage": "https://github.com/EligiusSantori"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "clue/redis-protocol": "^0.3.2",
+        "evenement/evenement": "^3.0 || ^2.0 || ^1.0",
+        "react/event-loop": "^1.2",
+        "react/promise": "^3.2",
+        "react/socket": "^1.16",
+        "illuminate/support": ">=10",
+        "react/promise-timer": "^1.11"
+    },
+    "require-dev": {
+        "pestphp/pest": "^3.8",
+        "react/async": "^4.3",
+        "laravel/envoy": "^2.9"
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Ontec\\ReactRedisStreams\\ServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/pest"
+    }
+}
