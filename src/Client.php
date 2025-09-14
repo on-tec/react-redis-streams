@@ -2,11 +2,13 @@
 
 namespace Ontec\ReactRedisStreams;
 
+use Carbon\Carbon;
 use Carbon\CarbonInterval;
 use Clue\Redis\Protocol\Model\ErrorReply;
 use Clue\Redis\Protocol\Parser\ResponseParser;
 use Clue\Redis\Protocol\Serializer\RecursiveSerializer;
 use Evenement\EventEmitter;
+use Illuminate\Support\Arr;
 use React\Promise\PromiseInterface;
 use React\Socket\Connector;
 use React\Stream\DuplexStreamInterface;
@@ -60,6 +62,16 @@ class Client extends EventEmitter
 		return $this;
 	}
 
+	public function trim(mixed $threshold): static {
+		if($threshold instanceof CarbonInterval)
+			$this->settings->trimBefore = round($threshold->totalMilliseconds);
+		elseif(is_numeric($threshold))
+			$this->settings->trimLength = intval($threshold);
+		else
+			throw new \InvalidArgumentException('Threshold must be either length or an interval.');
+		return $this;
+	}
+
 	public function scope(?string $consumer = null, ?string $group = null): static {
 		if(!$consumer || !$group)
 			$consumer = $group = '';
@@ -110,6 +122,30 @@ class Client extends EventEmitter
 	public function reset(): static {
 		$this->streams->dispose();
 		return $this;
+	}
+
+	public function record(string|int|null $id, array $entry, string $stream, bool $existing = false): PromiseInterface {
+		$args = [$stream];
+		if($existing)
+			$args[] = 'NOMKSTREAM';
+		if($this->settings->trimable()) {
+			// TODO ACKED (v8.2.0)
+			$args[] = $this->settings->trimLength > 0
+				? ['MAXLEN', '~', $this->settings->trimLength]
+				: ['MINID', '~', Carbon::now()->subMilliseconds($this->settings->trimBefore)->getTimestampMs()];
+			if($this->settings->limited())
+				$args[] = ['LIMIT', $this->settings->limit];
+		}
+		$args[] = is_null($id) ? '*' : $id;
+		foreach($entry as $key => $value)
+			$args[] = [$key, $value];
+		return $this->xadd(...Arr::flatten($args));
+	}
+
+	public function acknowledge(array|string|int $id, string $stream): PromiseInterface {
+		$ids = is_string($id) || is_numeric($id) ? [$id] : $id;
+		$this->settings->scoped() or throw new \UnexpectedValueException('No customer or group specified.');
+		return $this->xack($stream, $this->group(), ...$ids);
 	}
 
 	public function __call(string $name, array $args) {

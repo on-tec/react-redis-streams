@@ -101,6 +101,21 @@ test('Stream consumer re-read by alternation', function(Client $redis) use($stre
 
 })->depends('Stream write');
 
+test('High order write & acknowledge', function(Client $redis) use($stream, $consumer, $group) {
+	$redis->reset();
+	$redis->xGroup('DESTROY', $stream, $group);
+	$redis->xGroup('CREATE', $stream, $group, '$');
+	$redis->timeout(CarbonInterval::milliseconds(100))->limit(1)->scope($consumer, $group)
+		->trim(CarbonInterval::milliseconds(300))->stream($stream, '>');
+	$id = await($redis->record(null, ['x' => rand()], $stream));
+	\React\Async\delay(0.1);
+
+	$redis->run();
+	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($id);
+	$redis->acknowledge($id, $stream);
+	expect(await($redis->xpending($stream, $group))[0])->toBe(0);
+})->depends('Stream write');
+
 
 //beforeAll(fn() => debug_log('', true));
 //beforeEach(fn() => debug_log('=== '.$this->getPrintableTestCaseMethodName().' ==='));
