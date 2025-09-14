@@ -30,7 +30,7 @@
         "react/socket": "^1.16",
         "illuminate/support": ">=10",
         "react/promise-timer": "^1.11",
-        "nesbot/carbon": "^3.10"
+        "nesbot/carbon": "^3.0 || ^2.0"
     },
     "require-dev": {
         "pestphp/pest": "^3.8",
