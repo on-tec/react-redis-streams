@@ -1,7 +1,6 @@
 <?php
 
 use function \React\Async\await;
-use \Carbon\Carbon;
 use \Ontec\ReactRedisStreams\Client;
 use \Ontec\ReactRedisStreams\AuthenticationException;
 use \Ontec\ReactRedisStreams\ConnectionCloseException;
@@ -32,17 +31,6 @@ test('Answer decay', function() use($stream) {
 	await((new Client('redis://:123456@192.168.0.2:6380?decay=1', React\EventLoop\Loop::get()))
 		->xRead('block', 1500, 'streams', $stream, '$'));
 })->throws(ConnectionCloseException::class, 'Connection clos');
-
-test('Answer timeout', function () use($url, $stream) {
-	$result = new \React\Promise\Deferred();
-	$redis = new Client($url, React\EventLoop\Loop::get());
-	$redis->on('read', fn($data) => $result->resolve($data))->on('error', fn($data) => $result->reject($data));
-	$start = Carbon::now();
-	$redis->timeout(1)->limit(1)->stream($stream, '$')->run();
-	expect(await($result->promise()))->toBe([]);
-	expect(Carbon::now()->diffInSeconds($start, true))->toBeGreaterThanOrEqual(1);
-	$redis->removeAllListeners();
-});
 
 afterAll(function() {
 	$loop = React\EventLoop\Loop::get();

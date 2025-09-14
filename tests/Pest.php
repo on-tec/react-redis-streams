@@ -41,7 +41,15 @@ expect()->extend('test', function(string $value) {
 |
 */
 
-function something()
-{
-	// ..
+function awaitOneEvent(\Ontec\ReactRedisStreams\Client $redis, string $event): mixed {
+	$result = new \React\Promise\Deferred();
+	$redis->on($event, fn($data) => $result->resolve($data))
+		->on('error', fn($data) => $result->reject($data));
+	$data = \React\Async\await($result->promise());
+	$redis->removeAllListeners();
+	return $data;
+}
+
+function debug_log(string $line, bool $anew = false): void {
+	file_put_contents('debug.log', $line !== '' ? $line.PHP_EOL : '', $anew ? 0 : FILE_APPEND);
 }

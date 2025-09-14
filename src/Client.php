@@ -36,36 +36,66 @@ class Client extends EventEmitter
 				$s = tap($property->getValue($c), fn(DuplexStreamInterface $s) => $s->removeAllListeners());
 				$c = new StreamConnection($s, new ResponseParser(), new RecursiveSerializer(), $this->settings);
 				return $c->on('read', fn(mixed $data) => $this->emit('read', [$data]))
+					->on('fail', fn(mixed $info) => $this->emit('fail', [$info]))
 					->on('error', fn(\Throwable $e) => $this->emit('error', [$e]));
 			})))->validator(fn(StreamConnection $c) => $c->alive())
 			->disposer(function(StreamConnection $c) { $c->removeAllListeners(); $c->close(); });
 	}
 
 	public function stream(string $name, string $cursor): static {
-		if(isset($this->settings->streams[$name])) // Changing cursor of existing stream.
-			$this->streams->existent()->then(fn(?StreamConnection $c) => $c?->drop()); // Drop current operation.
-		$this->settings->streams[$name] = $cursor;
+		if(($this->settings->streams[$name] ?? null) != $cursor) {
+			$this->settings->streams[$name] = $cursor;
+			$this->streams->existent()->then(fn(?StreamConnection $c) => $c?->invalidate());
+		}
 		return $this;
 	}
 
-	public function consumer(?string $consumer, ?string $group = null): static {
+	public function timeout(?CarbonInterval $value): static {
+		$this->settings->timeout = $value ? $value->totalMilliseconds : 0;
+		return $this;
+	}
+
+	public function limit(?int $value): static {
+		$this->settings->limit = $value ?: 0;
+		return $this;
+	}
+
+	public function scope(?string $consumer = null, ?string $group = null): static {
 		if(!$consumer || !$group)
 			$consumer = $group = '';
 		if($this->settings->group != $group || $this->settings->consumer != $consumer) {
-			$this->streams->existent()->then(fn(?StreamConnection $c) => $c?->drop()); // Drop current operation.
+			$this->streams->unresolved() or throw ReconfigurationException::running();
 			$this->settings->group = $group;
 			$this->settings->consumer = $consumer;
 		}
 		return $this;
 	}
 
-	public function timeout(?float $value): static {
-		$this->settings->timeout = round($value * 1000) ?: 0;
-		return $this;
+	public function consumer(): ?string {
+		return $this->settings->consumer ?: null;
 	}
 
-	public function limit(?int $value): static {
-		$this->settings->limit = $value ?: 0;
+	public function group(): ?string {
+		return $this->settings->group ?: null;
+	}
+
+	/**
+	 * @param CarbonInterval $after Maximum duration of entry processing time.
+	 * @param int $times Maximum retries before entry gets considered unprocessable.
+	 * @param int $every Maximum new entries before check for stalled ones.
+	 * @return $this
+	 */
+	public function retry(CarbonInterval $after, int $times, int $every = 0, bool $foreign = false): static {
+		$this->settings->maxRetries = $times;
+		$changed = $this->settings->retryAfter != $after->totalMilliseconds
+			|| $this->settings->retryEvery != $every
+			|| $this->settings->retryForeign != $foreign;
+		if($changed) {
+			$this->streams->unresolved() or throw ReconfigurationException::running();
+			$this->settings->retryAfter = $after->totalMilliseconds;
+			$this->settings->retryEvery = $every;
+			$this->settings->retryForeign = $foreign;
+		}
 		return $this;
 	}
 

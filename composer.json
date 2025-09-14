@@ -29,7 +29,8 @@
         "react/promise": "^3.2",
         "react/socket": "^1.16",
         "illuminate/support": ">=10",
-        "react/promise-timer": "^1.11"
+        "react/promise-timer": "^1.11",
+        "nesbot/carbon": "^3.10"
     },
     "require-dev": {
         "pestphp/pest": "^3.8",

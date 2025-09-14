@@ -34,6 +34,10 @@ class PromisedValue
 			return $this->pending?->promise() ?? resolved(null);
 	}
 
+	public function unresolved(): bool {
+		return is_null($this->value) ? is_null($this->pending) : !$this->validate($this->value);
+	}
+
 	public function validator(callable $fn): static {
 		$this->validator = $fn(...);
 		return $this;

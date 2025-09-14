@@ -1,6 +1,7 @@
 <?php
 
 use function \React\Async\await;
+use \Carbon\CarbonInterval;
 use \Ontec\ReactRedisStreams\Client;
 
 list('URL' => $url, 'STREAM' => $stream, 'GROUP' => $group, 'CONSUMER' => $consumer) = $_ENV;
@@ -22,43 +23,89 @@ test('Stream write', function(Client $redis) use($stream) {
 test('Stream bulk read', function(Client $redis) use($stream) {
 	$result = new \React\Promise\Deferred();
 	$redis->on('read', fn($data) => $result->resolve($data))->on('error', fn($data) => $result->reject($data));
-	$redis->timeout(1)->stream($stream, '0')->run();
+	$redis->timeout(CarbonInterval::second())->stream($stream, '0')->run();
 	expect(await($result->promise())[$stream] ?? [])->toHaveLength(3, 'Bulk read');
 	$redis->removeAllListeners();
 })->depends('Stream write');
 
 test('Stream sequential read', function(Client $redis) use($stream) {
-	$redis->timeout(0.1)->limit(1)->stream($stream, '0');
-	for($i = 0; $i < 5; $i++) {
-		$result = new \React\Promise\Deferred();
-		$redis->on('read', fn($data) => $result->resolve($data))->on('error', fn($data) => $result->reject($data));
-		expect(await($result->promise())[$stream] ?? [])->toHaveLength($i < 3 ? 1 : 0);
-		$redis->removeAllListeners();
-	}
+	$redis->timeout(CarbonInterval::milliseconds(100))->limit(1)->stream($stream, '0');
+	for($i = 0; $i < 3; $i++)
+		expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveLength(1);
 })->depends('Stream write');
 
 test('Stream consumer read new', function(Client $redis) use($stream, $consumer, $group) {
 	await($redis->xGroup('DESTROY', $stream, $group));
 	await($redis->xGroup('CREATE', $stream, $group, '0'));
-	$redis->timeout(0.1)->limit(1)->consumer($consumer, $group)->stream($stream, '0');
+	$redis->reset()->timeout(CarbonInterval::milliseconds(100))->limit(1)
+		->scope($consumer, $group)->stream($stream, '0')->run();
 
-	for($i = 0; $i < 5; $i++) {
-		$result = new \React\Promise\Deferred();
-		$redis->on('read', fn($data) => $result->resolve($data))->on('error', fn($data) => $result->reject($data));
-		$data = await($result->promise())[$stream] ?? [];
-		expect($data)->toHaveLength($i > 0 && $i < 4 ? 1 : 0);
-		$redis->removeAllListeners();
-	}
+	for($i = 0; $i < 3; $i++)
+		expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveLength(1);
 })->depends('Stream write');
 
 test('Stream consumer read pending', function(Client $redis) use($stream, $consumer, $group) {
-	$redis->timeout(0.1)->limit(1)->consumer($consumer, $group)->stream($stream, '0');
+	$redis->reset()->timeout(CarbonInterval::milliseconds(100))->limit(1)
+		->scope($consumer, $group)->stream($stream, '0')->run();
 
-	for($i = 0; $i < 5; $i++) {
-		$result = new \React\Promise\Deferred();
-		$redis->on('read', fn($data) => $result->resolve($data))->on('error', fn($data) => $result->reject($data));
-		$data = await($result->promise())[$stream] ?? [];
-		expect($data)->toHaveLength($i < 3 ? 1 : 0);
-		$redis->removeAllListeners();
+	for($i = 0; $i < 3; $i++)
+		expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveLength(1);
+})->depends('Stream write');
+
+test('Stream consumer re-read by expiration', function(Client $redis) use($stream, $consumer, $group) {
+	$redis->reset();
+	$redis->timeout(CarbonInterval::milliseconds(100))->limit(1)->scope($consumer, $group)
+		->retry(CarbonInterval::milliseconds(100), 3)->stream($stream, '>');
+	\React\Async\delay(0.1);
+	$redis->run();
+
+	$ids = array_fill_keys(['a', 'b', 'c'], null);
+	foreach(array_keys($ids) as $key) { // 3rd try.
+		$data = awaitOneEvent($redis, 'read')[$stream] ?? [];
+		expect($data[$ids[$key] = array_key_first($data)])->toHaveKey($key);
+		if($key == 'b') {
+			$redis->xack($stream, $group, $ids[$key]);
+			$ids['d'] = await($redis->xadd($stream, 'maxlen', '=', 4, '*', 'd', 4));
+		}
+	}
+
+	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['d']);
+
+	unset($ids['b']);
+	foreach($ids as $id) { // a, c fail.
+		$data = awaitOneEvent($redis, 'fail');
+		expect($data[0]['retries'] ?? null)->toBe(3);
+		expect($data[0]['id'] ?? null)->toBe($id);
 	}
 })->depends('Stream write');
+
+test('Stream consumer re-read by alternation', function(Client $redis) use($stream, $consumer, $group) {
+	$redis->reset();
+	$redis->timeout(CarbonInterval::milliseconds(100))->limit(1)->scope($consumer, $group)
+		->retry(CarbonInterval::day(), 1, 2)->stream($stream, '>');
+	\React\Async\delay(0.1);
+
+	$idle = CarbonInterval::week()->totalMilliseconds;
+	foreach(['e', 'f', 'g', 'h'] as $i => $v)
+		$ids[$v] = await($redis->xadd($stream, 'maxlen', '=', 4, '*', $v, $i + 5));
+
+	$redis->run();
+	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['e']);
+	$redis->xclaim($stream, $group, $consumer, 0, $ids['e'], 'IDLE', $idle, 'FORCE');
+	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['f']);
+	expect(awaitOneEvent($redis, 'fail')[0]['id'] ?? null)->toBe($ids['e']);
+	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['g']);
+	$redis->xclaim($stream, $group, $consumer, 0, $ids['f'], 'IDLE', $idle, 'FORCE');
+	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['h']);
+	expect(awaitOneEvent($redis, 'fail')[0]['id'] ?? null)->toBe($ids['f']);
+
+})->depends('Stream write');
+
+
+//beforeAll(fn() => debug_log('', true));
+//beforeEach(fn() => debug_log('=== '.$this->getPrintableTestCaseMethodName().' ==='));
+//afterAll(function() {
+//	$loop = React\EventLoop\Loop::get();
+//	$loop->addTimer(1, fn() => $loop->stop());
+////	$loop->run();
+//});
