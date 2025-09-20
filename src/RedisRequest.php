@@ -9,11 +9,13 @@ class RedisRequest
 {
 	public readonly string $command;
 	public readonly ?array $arguments;
+	public readonly array $payload;
 	protected Deferred $deferred;
 
-	public function __construct(string $command, ?array $arguments = null) {
+	public function __construct(string $command, ?array $arguments = null, array $extra = []) {
 		$this->command = strtoupper($command);
 		$this->arguments = $arguments;
+		$this->payload = $extra;
 		$this->deferred = new Deferred();
 	}
 

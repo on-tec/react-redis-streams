@@ -33,7 +33,7 @@
         "nesbot/carbon": "^3.0 || ^2.0"
     },
     "require-dev": {
-        "pestphp/pest": "^3.8",
+        "pestphp/pest": "^4.1",
         "react/async": "^4.3",
         "laravel/envoy": "^2.9"
     },

@@ -39,7 +39,6 @@ test('Stream consumer read new', function(Client $redis) use($stream, $consumer,
 	await($redis->xGroup('CREATE', $stream, $group, '0'));
 	$redis->reset()->timeout(CarbonInterval::milliseconds(100))->limit(1)
 		->scope($consumer, $group)->stream($stream, '0')->run();
-
 	for($i = 0; $i < 3; $i++)
 		expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveLength(1);
 })->depends('Stream write');
@@ -47,7 +46,6 @@ test('Stream consumer read new', function(Client $redis) use($stream, $consumer,
 test('Stream consumer read pending', function(Client $redis) use($stream, $consumer, $group) {
 	$redis->reset()->timeout(CarbonInterval::milliseconds(100))->limit(1)
 		->scope($consumer, $group)->stream($stream, '0')->run();
-
 	for($i = 0; $i < 3; $i++)
 		expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveLength(1);
 })->depends('Stream write');
@@ -61,21 +59,22 @@ test('Stream consumer re-read by expiration', function(Client $redis) use($strea
 
 	$ids = array_fill_keys(['a', 'b', 'c'], null);
 	foreach(array_keys($ids) as $key) { // 3rd try.
-		$data = awaitOneEvent($redis, 'read')[$stream] ?? [];
-		expect($data[$ids[$key] = array_key_first($data)])->toHaveKey($key);
+		$entry = head(awaitOneEvent($redis, 'read')[$stream] ?? []);
+		expect($entry)->toHaveKey($key);
 		if($key == 'b') {
-			$redis->xack($stream, $group, $ids[$key]);
+			$redis->xack($stream, $group, $entry->id);
 			$ids['d'] = await($redis->xadd($stream, 'maxlen', '=', 4, '*', 'd', 4));
-		}
+		} else
+			$ids[$key] = $entry->id;
 	}
 
 	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['d']);
 
 	unset($ids['b']);
-	foreach($ids as $id) { // a, c fail.
-		$data = awaitOneEvent($redis, 'fail');
-		expect($data[0]['retries'] ?? null)->toBe(3);
-		expect($data[0]['id'] ?? null)->toBe($id);
+	foreach($ids as $id) { // Fail: a, c.
+		$entry = head(awaitOneEvent($redis, 'fail')[$stream] ?? []);
+		expect($entry?->id)->toBe($id);
+		expect($entry?->retries)->toBe(3);
 	}
 })->depends('Stream write');
 
@@ -93,11 +92,11 @@ test('Stream consumer re-read by alternation', function(Client $redis) use($stre
 	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['e']);
 	$redis->xclaim($stream, $group, $consumer, 0, $ids['e'], 'IDLE', $idle, 'FORCE');
 	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['f']);
-	expect(awaitOneEvent($redis, 'fail')[0]['id'] ?? null)->toBe($ids['e']);
+	expect(awaitOneEvent($redis, 'fail')[$stream] ?? [])->toHaveKey($ids['e']);
 	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['g']);
 	$redis->xclaim($stream, $group, $consumer, 0, $ids['f'], 'IDLE', $idle, 'FORCE');
 	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($ids['h']);
-	expect(awaitOneEvent($redis, 'fail')[0]['id'] ?? null)->toBe($ids['f']);
+	expect(awaitOneEvent($redis, 'fail')[$stream] ?? [])->toHaveKey($ids['f']);
 
 })->depends('Stream write');
 
@@ -107,7 +106,7 @@ test('High order write & acknowledge', function(Client $redis) use($stream, $con
 	$redis->xGroup('CREATE', $stream, $group, '$');
 	$redis->timeout(CarbonInterval::milliseconds(100))->limit(1)->scope($consumer, $group)
 		->trim(CarbonInterval::milliseconds(300))->stream($stream, '>');
-	$id = await($redis->record(null, ['x' => rand()], $stream));
+	$id = await($redis->record(new \Ontec\ReactRedisStreams\Entry(['x' => rand()], $stream)));
 	\React\Async\delay(0.1);
 
 	$redis->run();

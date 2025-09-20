@@ -31,7 +31,7 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 		$this->queue = new \SplQueue();
 		$io->on('data', fn(mixed $data) => $this->data($data));
 		$io->on('close', fn() => $this->close());
-		$this->lastRetry = $this->settings->durable() ? Carbon::now() : null; // Use cursor = 0 for first pending iteration.
+		$this->lastRetry = $this->settings->durable() ? Carbon::now('UTC') : null; // Use cursor = 0 for first pending iteration.
 	}
 
 	public function alive(): bool {
@@ -46,7 +46,7 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 	/** Cursor or streams changed => drop current read state & blocking operation response. */
 	public function invalidate(): static {
 		if($this->running()) {
-			$this->lastRetry = $this->settings->durable() ? Carbon::now() : null;
+			$this->lastRetry = $this->settings->durable() ? Carbon::now('UTC') : null;
 			$this->leftEntries = -1; // Reset or disable.
 			if($this->blocking)
 				$this->dropping = true;
@@ -106,7 +106,7 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 				$this->xReadGroup($limit, min($timeToRetry + 1, $this->settings->timeout));
 			} else {
 				$this->settings->limited() or throw new \UnexpectedValueException('Entity limit is required for retrospection.');
-				$this->lastRetry = Carbon::now();
+				$this->lastRetry = Carbon::now('UTC');
 				$this->leftEntries = $this->settings->chunkedRetry() ? $this->settings->retryEvery : -1;
 				foreach($this->settings->streams as $stream => $cursor)
 					$this->xPending($stream);
@@ -117,7 +117,7 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 
 	protected function timeToRetry(): int {
 		return is_null($this->lastRetry) ? 0 :
-			intval($this->settings->retryAfter - $this->lastRetry->diffInMilliseconds(Carbon::now(), false));
+			intval($this->settings->retryAfter - $this->lastRetry->diffInMilliseconds(Carbon::now('UTC'), false));
 	}
 
 	protected function countToRetry(): int {
@@ -145,9 +145,9 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 		$this->execute($request);
 	}
 
-	protected function xClaim(string $stream, array $ids) {
-		$args = [$stream, $this->settings->group, $this->settings->consumer, $this->settings->retryAfter, $ids];
-		$this->queue->enqueue($request = new RedisRequest('XCLAIM', Arr::flatten($args)));
+	protected function xClaim(string $stream, array $entries) {
+		$args = [$stream, $this->settings->group, $this->settings->consumer, $this->settings->retryAfter, array_keys($entries)];
+		$this->queue->enqueue($request = new RedisRequest('XCLAIM', Arr::flatten($args), $entries));
 		$this->execute($request);
 	}
 
@@ -216,54 +216,65 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 	}
 
 	protected function handlePending(ModelInterface $response, RedisRequest $request): void {
-		list($stream, $claimable, $failed, $total) = [$request->arguments[0], [], [], 0];
+		list($stream, $entries) = [$request->arguments[0], []];
 		foreach($response->getValueNative() ?: [] as $temp) {
 			list($id, $consumer, $idle, $retries) = $temp;
 			#debug_log("    {$id} {$consumer} {$idle} {$retries} {$stream}");
-			if($this->settings->failableRetry() && $retries >= $this->settings->maxRetries)
-				$failed[] = ['id' => $id, 'retries' => $retries, 'last_at' => Carbon::now()->subMilliseconds($idle),
-					'consumer' => $consumer, 'group' => $this->settings->group, 'stream' => $stream];
-			else
-				$claimable[] = $id;
-			$total++;
+			$entries[$id] = $entry = new Entry($id, [], $stream);
+			$entry->retries = intval($retries);
+			$entry->consumer = $consumer;
+			$entry->claimed_at = Carbon::now('UTC')->subMilliseconds($idle);
 		}
-		if(count($failed) > 0) {
-			$this->xAcknowledge($stream, array_column($failed, 'id'));
-			$this->emit('fail', [$failed]);
-		}
-		if(count($claimable) > 0)
-			$this->xClaim($stream, $claimable);
 
-		if($total > 0 && $this->settings->limited() && $total >= $this->settings->limit)
+		if(!empty($entries))
+			$this->xClaim($stream, $entries);
+
+		if(!empty($entries) && $this->settings->limited() && count($entries) >= $this->settings->limit)
 			$this->xPending($stream); // Request the next page.
 	}
 
 	protected function handleClaim(ModelInterface $response, RedisRequest $request): void {
-		$data = $response->getValueNative();
-		$data = !is_null($data) ? $this->structurize([[$request->arguments[0], $response->getValueNative()]]) : [];
-		$this->emit('read', [$data, $this->settings->streams]); // TODO Retry counts.
+		if(!is_null($data = $response->getValueNative())) {
+			list($stream, $read, $failed) = [$request->arguments[0], [], []];
+			$data = $this->structurize([[$stream, $data]], [$stream => $request->payload]);
+			/** @var Entry $entry */
+			foreach($data[$stream] as $id => $entry)
+				if($this->settings->failableRetry() && $entry->retries >= $this->settings->maxRetries)
+					$failed[$id] = $entry;
+				else
+					$read[$id] = $entry;
+
+			if(!empty($read))
+				$this->emit('read', [[$stream => $read], $this->settings->streams]);
+
+			if(!empty($failed)) {
+				$this->xAcknowledge($stream, array_keys($failed));
+				$this->emit('fail', [[$stream => $failed]]);
+			}
+		}
 	}
 
-	protected function structurize(iterable $data): array {
-		$streams = [];
+	protected function structurize(iterable $data, array $streams = []): array {
 		foreach($data as $a) {
-			if(is_null($a[0]) || is_null($a[1]))
+			if(is_null($name = $a[0] ?? null) || is_null($a[1] ?? null))
 				continue;
-			$stream = [];
+			$stream = $streams[$name] ?? [];
 			foreach($a[1] as $b) {
-				if(is_null($b[0]) || is_null($b[1]))
+				if(is_null($id = $b[0] ?? null) || is_null($b[1] ?? null))
 					continue;
-				$record = [];
+				$record = $stream[$id] ?? new Entry($id, $name);
 				$i = is_array($b[1]) ? new \ArrayIterator($b[1]) : new \IteratorIterator($b[1]);
 				while($i->valid()) {
 					$k = $i->current(); $i->next();
 					$record[$k] = $i->current(); $i->next();
 				}
-				if(!empty($record))
-					$stream[$b[0]] = $record;
+				if(!$record->isEmpty())
+					$stream[$id] = $record;
+				else
+					unset($stream[$id]);
 			}
 			if(!empty($stream))
-				$streams[$a[0]] = $stream;
+				$streams[$name] = $stream;
 		}
 		return $streams;
 	}

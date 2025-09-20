@@ -124,21 +124,21 @@ class Client extends EventEmitter
 		return $this;
 	}
 
-	public function record(string|int|null $id, array $entry, string $stream, bool $existing = false): PromiseInterface {
-		$args = [$stream];
-		if($existing)
-			$args[] = 'NOMKSTREAM';
+	public function record(Entry $entry, bool $existing = false): PromiseInterface {
+		empty($entry->stream) and throw new \InvalidArgumentException('Stream is required.');
+		$entry->count() > 0 or throw new \InvalidArgumentException('Entry must have at least one field.');
+		$args = [$entry->stream];
+		$existing and $args[] = 'NOMKSTREAM';
 		if($this->settings->trimable()) {
 			// TODO ACKED (v8.2.0)
 			$args[] = $this->settings->trimLength > 0
 				? ['MAXLEN', '~', $this->settings->trimLength]
-				: ['MINID', '~', Carbon::now()->subMilliseconds($this->settings->trimBefore)->getTimestampMs()];
-			if($this->settings->limited())
-				$args[] = ['LIMIT', $this->settings->limit];
+				: ['MINID', '~', Carbon::now('UTC')->subMilliseconds($this->settings->trimBefore)->getTimestampMs()];
+			$this->settings->limited() and $args[] = ['LIMIT', $this->settings->limit];
 		}
-		$args[] = is_null($id) ? '*' : $id;
+		$args[] = $entry->id !== '' ? $entry->id : '*';
 		foreach($entry as $key => $value)
-			$args[] = [$key, $value];
+			$args[] = [$key, strval($value)];
 		return $this->xadd(...Arr::flatten($args));
 	}
 
