@@ -3,6 +3,7 @@
 use function \React\Async\await;
 use \Carbon\CarbonInterval;
 use \Ontec\ReactRedisStreams\Client;
+use \Ontec\ReactRedisStreams\Entry;
 
 list('URL' => $url, 'STREAM' => $stream, 'GROUP' => $group, 'CONSUMER' => $consumer) = $_ENV;
 
@@ -106,12 +107,12 @@ test('High order write & acknowledge', function(Client $redis) use($stream, $con
 	$redis->xGroup('CREATE', $stream, $group, '$');
 	$redis->timeout(CarbonInterval::milliseconds(100))->limit(1)->scope($consumer, $group)
 		->trim(CarbonInterval::milliseconds(300))->stream($stream, '>');
-	$id = await($redis->record(new \Ontec\ReactRedisStreams\Entry(['x' => rand()], $stream)));
+	$id = await($redis->record(new Entry(['x' => rand()], $stream)));
 	\React\Async\delay(0.1);
 
 	$redis->run();
 	expect(awaitOneEvent($redis, 'read')[$stream] ?? [])->toHaveKey($id);
-	$redis->acknowledge($id, $stream);
+	$redis->acknowledge(new Entry($id, $stream));
 	expect(await($redis->xpending($stream, $group))[0])->toBe(0);
 })->depends('Stream write');
 

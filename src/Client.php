@@ -142,10 +142,11 @@ class Client extends EventEmitter
 		return $this->xadd(...Arr::flatten($args));
 	}
 
-	public function acknowledge(array|string|int $id, string $stream): PromiseInterface {
-		$ids = is_string($id) || is_numeric($id) ? [$id] : $id;
+	public function acknowledge(Entry $entry): PromiseInterface {
+		$entry->id === '' and throw new \InvalidArgumentException('Entity id is required.');
+		$entry->stream === '' and throw new \InvalidArgumentException('Stream is required.');
 		$this->settings->scoped() or throw new \UnexpectedValueException('No customer or group specified.');
-		return $this->xack($stream, $this->group(), ...$ids);
+		return $this->xack($entry->stream, $this->group(), $entry->id);
 	}
 
 	public function __call(string $name, array $args) {
