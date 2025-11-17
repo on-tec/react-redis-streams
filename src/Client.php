@@ -9,10 +9,12 @@ use Clue\Redis\Protocol\Parser\ResponseParser;
 use Clue\Redis\Protocol\Serializer\RecursiveSerializer;
 use Evenement\EventEmitter;
 use Illuminate\Support\Arr;
+use React\EventLoop\TimerInterface;
 use React\Promise\PromiseInterface;
 use React\Socket\Connector;
 use React\Stream\DuplexStreamInterface;
 use function React\Promise\resolve;
+use function React\Promise\reject;
 
 class Client extends EventEmitter
 {
@@ -20,6 +22,9 @@ class Client extends EventEmitter
 	protected PromisedValue $control;
 	protected PromisedValue $streams;
 	protected StreamSettings $settings;
+	protected ?TimerInterface $_keepAlive = null;
+	protected bool $ending = false;
+	protected bool $closed = false;
 
 	public function __construct(string $url, protected \React\EventLoop\LoopInterface $loop) {
 		$this->url = new RedisURL($url);
@@ -39,39 +44,73 @@ class Client extends EventEmitter
 				$c = new StreamConnection($s, new ResponseParser(), new RecursiveSerializer(), $this->settings);
 				return $c->on('read', fn(mixed $data) => $this->emit('read', [$data]))
 					->on('fail', fn(mixed $info) => $this->emit('fail', [$info]))
-					->on('error', fn(\Throwable $e) => $this->emit('error', [$e]));
+					->on('error', fn(\Throwable $e) => $this->emit('error', [$e]))
+					->on('close', fn() => $this->keepAlive());
 			})))->validator(fn(StreamConnection $c) => $c->alive())
 			->disposer(function(StreamConnection $c) { $c->removeAllListeners(); $c->close(); });
 	}
 
-	public function stream(string $name, string $cursor): static {
-		if(($this->settings->streams[$name] ?? null) != $cursor) {
-			$this->settings->streams[$name] = $cursor;
-			$this->streams->existent()->then(fn(?StreamConnection $c) => $c?->invalidate());
+	public function listen(array $streams): static {
+		if($this->settings->streams != $streams && !$this->ending) {
+			$this->settings->streams = $streams;
+			$this->streams->dispose(); // Abort current blocking operation on streams connection and stop it.
+			$this->keepAlive(); // Force connect if connection is not exists yet (otherwise it auto-reconnects).
 		}
 		return $this;
 	}
 
+	/**
+	 * Used for:
+	 * 1. XREAD/XREADGROUP regular interruption.
+	 * 2. Streams connection alive check interval.
+	 * @param CarbonInterval|null $value
+	 * @return $this
+	 */
 	public function timeout(?CarbonInterval $value): static {
-		$this->settings->timeout = $value ? $value->totalMilliseconds : 0;
+		$timeout = $value ? $value->totalMilliseconds : 0;
+		if($this->settings->timeout != $timeout) {
+			empty($this->_keepAlive) or $this->loop->cancelTimer($this->_keepAlive);
+			$this->_keepAlive = empty($timeout) ? null : $this->loop
+				->addPeriodicTimer($timeout / 1000, fn() => $this->keepAlive());
+		}
+		$this->settings->timeout = $timeout;
 		return $this;
 	}
 
+	/**
+	 * Used for:
+	 * 1. XREAD/XREADGROUP results partitioning.
+	 * 2. XPENDING entries pagination.
+	 * 3. XTRIM limit per call.
+	 * @param int|null $value
+	 * @return $this
+	 */
 	public function limit(?int $value): static {
 		$this->settings->limit = $value ?: 0;
 		return $this;
 	}
 
-	public function trim(mixed $threshold): static {
-		if($threshold instanceof CarbonInterval)
-			$this->settings->trimBefore = round($threshold->totalMilliseconds);
-		elseif(is_numeric($threshold))
-			$this->settings->trimLength = intval($threshold);
+	/**
+	 * Enables auto-trimming feature.
+	 * @param mixed $depth Time interval or entries amount.
+	 * @return $this
+	 */
+	public function trim(mixed $depth): static {
+		if($depth instanceof CarbonInterval)
+			$this->settings->trimBefore = round($depth->totalMilliseconds);
+		elseif(is_numeric($depth))
+			$this->settings->trimLength = intval($depth);
 		else
-			throw new \InvalidArgumentException('Threshold must be either length or an interval.');
+			throw new \InvalidArgumentException('Depth must be either length or an interval.');
 		return $this;
 	}
 
+	/**
+	 * Sets consumer & group and enables shared reading mode.
+	 * @param string|null $consumer
+	 * @param string|null $group
+	 * @return $this
+	 */
 	public function scope(?string $consumer = null, ?string $group = null): static {
 		if(!$consumer || !$group)
 			$consumer = $group = '';
@@ -111,19 +150,6 @@ class Client extends EventEmitter
 		return $this;
 	}
 
-	public function run(): PromiseInterface {
-		return $this->streams()->then(function(StreamConnection $c) {
-			$c->run();
-			return $this;
-		});
-	}
-
-	/** Abort current blocking operation on streams connection and stop it. */
-	public function reset(): static {
-		$this->streams->dispose();
-		return $this;
-	}
-
 	public function record(Entry $entry, bool $existing = false): PromiseInterface {
 		empty($entry->stream) and throw new \InvalidArgumentException('Stream is required.');
 		$entry->count() > 0 or throw new \InvalidArgumentException('Entry must have at least one field.');
@@ -149,24 +175,39 @@ class Client extends EventEmitter
 		return $this->xack($entry->stream, $this->group(), $entry->id);
 	}
 
-	public function __call(string $name, array $args) {
-		return $this->control()->then(function(ControlConnection $c) use($name, $args) {
-			$this->control->prolong();
-			return $c->__call($name, $args)
-				->finally(fn() => $this->control->prolong());
-		});
+	public function __call(string $name, array $args): PromiseInterface {
+		if(!$this->ending)
+			return $this->control()->then(function(ControlConnection $c) use($name, $args) {
+				$this->control->prolong();
+				return $c->__call($name, $args)
+					->finally(fn() => $this->control->prolong());
+			});
+		else
+			return reject(new ConnectionCloseException(!$this->closed, 'SOCKET_ENOTCONN'));
 	}
 
 	public function end() {
+		$this->ending = true;
 		$this->control->existent(false)->then(fn(?ConnectionInterface $c) => $c?->end());
 		$this->streams->existent(false)->then(fn(?ConnectionInterface $c) => $c?->end());
 	}
 
-	public function close() {
+	public function close() { // FIXME Not called automatically when inner connections get closed by end() call.
+		if($this->closed)
+			return;
+
+		$this->ending = $this->closed = true;
+		empty($this->_keepAlive) or $this->loop->cancelTimer($this->_keepAlive);
 		$this->control->dispose();
 		$this->streams->dispose();
+
 		$this->emit('close');
 		$this->removeAllListeners();
+	}
+
+	protected function keepAlive(): void {
+		if($this->settings->hasStreams() && !$this->ending)
+			$this->streams();
 	}
 
 	protected function connect(): PromiseInterface {
@@ -174,15 +215,21 @@ class Client extends EventEmitter
 			->then(fn(DuplexStreamInterface $connection) => new ControlConnection($connection, new ResponseParser(), new RecursiveSerializer()))
 			->then(function(ControlConnection $connection) {
 				if($credentials = $this->url->getCredentials())
-					return $connection->auth($credentials[1], $credentials[0])->then(fn() => $connection,
-						fn(\Throwable $e) => throw new AuthenticationException($e->getMessage()));
+					return $connection->auth($credentials[1], $credentials[0])
+						->then(fn() => $connection, function(\Throwable $e) use($connection) {
+							$connection->close();
+							throw new AuthenticationException($e->getMessage());
+						});
 				else
 					return resolve($connection);
 			})->then(function(ControlConnection $connection) {
 				if(($db = $this->url->database) >= 0)
-					return $connection->select($db)->then(fn() => $connection, fn(\Throwable $e) =>
-						throw str_starts_with(ltrim($e->getMessage()), 'ERR DB') ?
-							new \OutOfBoundsException($e->getMessage()) : $e);
+					return $connection->select($db)
+						->then(fn() => $connection, function(\Throwable $e) use($connection) {
+							$connection->close();
+							throw str_starts_with(ltrim($e->getMessage()), 'ERR DB')
+								? new \OutOfBoundsException($e->getMessage()) : $e;
+						});
 				else
 					return resolve($connection);
 			});

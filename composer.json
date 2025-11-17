@@ -35,7 +35,8 @@
     "require-dev": {
         "pestphp/pest": "^4.1",
         "react/async": "^4.3",
-        "laravel/envoy": "^2.9"
+        "laravel/envoy": "^2.9",
+        "spatie/invade": "^2.1"
     },
     "config": {
         "allow-plugins": {

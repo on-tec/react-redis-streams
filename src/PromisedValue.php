@@ -52,6 +52,9 @@ class PromisedValue
 		$this->value = null;
 		$resolving = resolved(($this->resolver)());
 		$this->pending = $pending = new Deferred(function() use($resolving) {
+			$resolving
+				->then(fn($value) => $this->disposer and ($this->disposer)($value))
+				->catch(function() { /* Skip errors on cancelled resolution.*/ });
 			$resolving->cancel();
 			$this->pending = $this->value = null;
 		});

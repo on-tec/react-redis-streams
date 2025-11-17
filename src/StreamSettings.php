@@ -7,7 +7,7 @@ class StreamSettings
 	public array $streams = [];
 	public string $consumer = '';
 	public string $group = '';
-	public int $timeout = -1; // In milliseconds. Endless if 0. Disabled if -1.
+	public int $timeout = 0; // In milliseconds. Endless if 0.
 	public int $limit = 0; // Disabled if 0.
 	public int $retryAfter = 0; // In milliseconds. Disabled if 0.
 	public int $retryEvery = 0; // Disabled if 0.
@@ -22,10 +22,6 @@ class StreamSettings
 
 	public function scoped(): bool {
 		return $this->consumer !== '' && $this->group !== '';
-	}
-
-	public function blocking(): bool {
-		return $this->timeout >= 0;
 	}
 
 	public function endlessBlocking(): bool {

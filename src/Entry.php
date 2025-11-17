@@ -21,26 +21,28 @@ class Entry implements \ArrayAccess, \Countable, \IteratorAggregate, \JsonSerial
 	 * @param string $stream (optional)
 	 */
 	public function __construct(...$args) {
-		if(count($args) > 0) {
+		if(count($args) > 0)
 			if(is_string($args[0]) || is_integer($args[0])) {
 				$this->id = strval($args[0]);
 				array_shift($args);
 			} elseif(is_null($args[0]))
 				array_shift($args);
 
+		if(count($args) > 0)
 			if(is_array($args[0])) {
 				$this->data = $args[0];
 				array_shift($args);
-			}
+			} elseif(is_null($args[0]))
+				array_shift($args);
 
+		if(count($args) > 0)
 			if(is_string($args[0])) {
 				$this->stream = $args[0];
 				array_shift($args);
 			}
 
-			if(count($args) > 0)
-				throw new \InvalidArgumentException('Entry id, data and stream name were expected.');
-		}
+		if(count($args) > 0)
+			throw new \InvalidArgumentException('Entry id, data and stream name were expected.');
 	}
 
 	public function offsetExists(mixed $offset): bool {
@@ -75,6 +77,17 @@ class Entry implements \ArrayAccess, \Countable, \IteratorAggregate, \JsonSerial
 
 	public function toArray(): array {
 		return $this->data;
+	}
+
+	public function toLog(): array {
+		$entry = [];
+		$this->id !== '' and $entry['id'] = $this->id;
+		$this->stream !== '' and $entry['stream'] = $this->stream;
+		$this->consumer !== '' and $entry['consumer'] = $this->consumer;
+		$this->retries >= 0 and $entry['retries'] = $this->retries;
+		is_null($this->claimed_at) or $entry['claimed_at'] = strval($this->claimed_at);
+		$this->isEmpty() or $entry['payload'] = $this->data;
+		return $entry;
 	}
 
 	public function isEmpty(): bool {

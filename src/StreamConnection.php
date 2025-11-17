@@ -18,9 +18,6 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 	protected \SplQueue $queue;
 	protected bool $ending = false;
 	protected bool $closed = false;
-	protected bool $_running = false;
-	protected bool $blocking = false;
-	protected bool $dropping = false;
 	protected ?Carbon $lastRetry = null;
 	protected int $leftEntries = -1;
 
@@ -29,34 +26,15 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 								protected SerializerInterface   $serializer,
 								protected StreamSettings        $settings) {
 		$this->queue = new \SplQueue();
+		$this->settings->durable() and $this->lastRetry = Carbon::now('UTC'); // Use cursor = 0 for first pending iteration.
 		$io->on('data', fn(mixed $data) => $this->data($data));
 		$io->on('close', fn() => $this->close());
-		$this->lastRetry = $this->settings->durable() ? Carbon::now('UTC') : null; // Use cursor = 0 for first pending iteration.
+		$this->idle();
 	}
 
 	public function alive(): bool {
 		return !$this->ending && !$this->closed &&
 			$this->io->isReadable() && $this->io->isWritable();
-	}
-
-	public function running(): bool {
-		return $this->_running;
-	}
-
-	/** Cursor or streams changed => drop current read state & blocking operation response. */
-	public function invalidate(): static {
-		if($this->running()) {
-			$this->lastRetry = $this->settings->durable() ? Carbon::now('UTC') : null;
-			$this->leftEntries = -1; // Reset or disable.
-			if($this->blocking)
-				$this->dropping = true;
-		}
-		return $this;
-	}
-
-	public function run(): static {
-		$this->idle();
-		return $this;
 	}
 
 	public function end(): static {
@@ -67,45 +45,39 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 	public function close(): void {
 		if(!$this->closed) {
 			$this->ending = $this->closed = true;
-			$this->_running = false;
 			$this->io->close();
 			$this->emit('close');
 		}
 	}
 
 	protected function idle(): void {
-		if($this->closed || $this->ending)
-			$this->emit('error', [new ConnectionCloseException($this->ending, 'SOCKET_ENOTCONN')]);
-		if(!$this->ending) {
-			$this->_running = true;
+		if(!$this->ending)
 			$this->settings->scoped() ? $this->doReadGroup() : $this->xRead();
-		} else
+		else
 			$this->close();
 	}
 
 	protected function xRead(): void {
 		$this->settings->hasStreams() or throw new \RangeException('No streams selected.');
-		$this->settings->blocking() or throw new \RuntimeException('Non-blocking loop prevention.');
 		$args = [];
 		$this->settings->limit and $args[] = ['COUNT', $this->settings->limit];
-		$this->settings->timeout >= 0 and $args[] = ['BLOCK', $this->settings->timeout];
+		$args[] = ['BLOCK', $this->settings->timeout];
 		$args[] = ['STREAMS', array_keys($this->settings->streams), array_values($this->settings->streams)];
 		$this->execute(new RedisRequest('XREAD', Arr::flatten($args)));
 	}
 
 	protected function doReadGroup(): void {
 		$this->settings->hasStreams() or throw new \RangeException('No streams selected.');
-		$this->settings->scoped() or throw new \UnexpectedValueException('No customer or group specified.');
-		$this->settings->blocking() or throw new \RuntimeException('Non-blocking loop prevention.');
 
 		if($this->settings->durable()) {
 			list($timeToRetry, $countToRetry) = [$this->timeToRetry(), $this->countToRetry()];
 			#debug_log("Time left: {$timeToRetry}; count left: {$countToRetry}");
 			if($timeToRetry > 0 && $countToRetry != 0) {
 				$limit = $countToRetry > 0 ? min($this->settings->limit, $countToRetry) : $this->settings->limit;
-				$this->xReadGroup($limit, min($timeToRetry + 1, $this->settings->timeout));
+				$timeout = $this->settings->endlessBlocking() ? $timeToRetry + 1 : $this->settings->timeout;
+				$this->xReadGroup($limit, min($timeToRetry + 1, $timeout));
 			} else {
-				$this->settings->limited() or throw new \UnexpectedValueException('Entity limit is required for retrospection.');
+				$this->settings->limited() or throw new \UnexpectedValueException('Entries limit is required for retrospection.');
 				$this->lastRetry = Carbon::now('UTC');
 				$this->leftEntries = $this->settings->chunkedRetry() ? $this->settings->retryEvery : -1;
 				foreach($this->settings->streams as $stream => $cursor)
@@ -128,10 +100,9 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 	}
 
 	protected function xReadGroup(int $limit, int $timeout, $acknowledge = false): void {
-		$this->blocking = $timeout >= 0;
 		$args = ['GROUP', $this->settings->group, $this->settings->consumer];
 		$limit > 0 and $args[] = ['COUNT', $limit];
-		$timeout >= 0 and $args[] = ['BLOCK', $timeout];
+		$args[] = ['BLOCK', $timeout];
 		$acknowledge and $args[] = 'NOACK';
 		$args[] = ['STREAMS', array_keys($this->settings->streams), array_values($this->settings->streams)];
 		$this->execute(new RedisRequest('XREADGROUP', Arr::flatten($args)));
@@ -141,46 +112,44 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 		$args = [$stream, $this->settings->group, 'IDLE', $this->settings->retryAfter, '-', '+', $this->settings->limit];
 		if(!$this->settings->retryForeign)
 			$args[] = $this->settings->consumer;
-		$this->queue->enqueue($request = new RedisRequest('XPENDING', $args));
-		$this->execute($request);
+		$this->execute(new RedisRequest('XPENDING', $args), true);
 	}
 
 	protected function xClaim(string $stream, array $entries) {
 		$args = [$stream, $this->settings->group, $this->settings->consumer, $this->settings->retryAfter, array_keys($entries)];
-		$this->queue->enqueue($request = new RedisRequest('XCLAIM', Arr::flatten($args), $entries));
-		$this->execute($request);
+		$this->execute(new RedisRequest('XCLAIM', Arr::flatten($args), $entries), true);
 	}
 
 	protected function xAcknowledge(string $stream, array $ids) {
 		$args = [$stream, $this->settings->group, $ids];
-		$this->queue->enqueue($request = new RedisRequest('XACK', Arr::flatten($args)));
-		$this->execute($request);
+		$this->execute(new RedisRequest('XACK', Arr::flatten($args)), true);
 	}
 
-	protected function execute(RedisRequest $request) {
+	protected function execute(RedisRequest $request, $queue = false) {
 		#debug_log("{$request->command} ".implode(' ', $request->arguments));
 		$this->io->write($this->serializer->getRequestMessage($request->command, $request->arguments));
+		$queue and $this->queue->enqueue($request);
 	}
 
 	protected function data(mixed $data): void {
-		try { $responses = $this->parser->pushIncoming($data); }
-		catch(ParserException $error) {
-			$this->emit('error', [new InvalidDataException($error)]);
+		try {
+			$responses = $this->parser->pushIncoming($data);
+			foreach($responses as $data)
+				try { $this->handle($data); }
+				catch(\Throwable $e) { $this->emit('error', [$e]); } // Operation or event error.
+			if(!$this->ending && $this->queue->isEmpty())
+				$this->idle(); // Idle call could be moved into future tick if call stack grows.
+		} catch(\Throwable $e) {
+			$this->emit('error', [$e instanceof ParserException ? new InvalidDataException($e) : $e]);
 			$this->close();
-			return;
 		}
 
-		array_walk($responses, fn(ModelInterface $response) => $this->handle($response));
-		// Idle call may be moved into future tick if the call stack still grows.
-		if($this->ending)
-			$this->close();
-		elseif($this->running() && $this->queue->isEmpty())
-			$this->idle();
+		$this->ending and $this->close();
 	}
 
 	protected function handle(ModelInterface $response): void {
+		$request = $this->queue->isEmpty() ? null : $this->queue->dequeue();
 		if(!($response instanceof ErrorReply)) {
-			$request = $this->queue->isEmpty() ? null : $this->queue->dequeue();
 			switch($request?->command) {
 				case 'XPENDING': $this->handlePending($response, $request); break;
 				case 'XCLAIM': $this->handleClaim($response, $request); break;
@@ -192,12 +161,6 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 	}
 
 	protected function handleRead(ModelInterface $response): void {
-		$this->blocking = false;
-		if($this->dropping) { // Abort last blocking operation.
-			$this->dropping = false;
-			return;
-		}
-
 		$data = $response->getValueNative();
 		$data = !is_null($data) ? $this->structurize($data) : [];
 		#empty($data) or debug_log('    '.json_encode($data));
