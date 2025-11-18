@@ -50,13 +50,18 @@ class Client extends EventEmitter
 			->disposer(function(StreamConnection $c) { $c->removeAllListeners(); $c->close(); });
 	}
 
-	public function listen(array $streams): static {
+	public function listen(array $streams): PromiseInterface {
 		if($this->settings->streams != $streams && !$this->ending) {
 			$this->settings->streams = $streams;
 			$this->streams->dispose(); // Abort current blocking operation on streams connection and stop it.
 			$this->keepAlive(); // Force connect if connection is not exists yet (otherwise it auto-reconnects).
 		}
-		return $this;
+		if($this->ending)
+			return reject(new ConnectionCloseException(!$this->closed, 'SOCKET_ENOTCONN'));
+		elseif($this->settings->hasStreams())
+			return $this->streams()->then(fn() => $this);
+		else
+			return resolve($this);
 	}
 
 	/**
