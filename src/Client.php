@@ -18,7 +18,6 @@ use function React\Promise\reject;
 
 class Client extends EventEmitter
 {
-	protected RedisURL $url;
 	protected PromisedValue $control;
 	protected PromisedValue $streams;
 	protected StreamSettings $settings;
@@ -26,12 +25,11 @@ class Client extends EventEmitter
 	protected bool $ending = false;
 	protected bool $closed = false;
 
-	public function __construct(string $url, protected \React\EventLoop\LoopInterface $loop) {
-		$this->url = new RedisURL($url);
+	public function __construct(protected ConnectionDSN $dsn, protected \React\EventLoop\LoopInterface $loop) {
 		$this->control = (new DecayingValue(fn() =>
 			$this->connect()->then(fn(ControlConnection $c) =>
 				$c->on('error', fn(\Throwable $e) => $this->emit('error', [$e]))),
-			CarbonInterval::seconds($this->url->decay), $this->loop))
+			CarbonInterval::seconds($this->dsn->decay), $this->loop))
 			->throttle(CarbonInterval::seconds(1))
 			->validator(fn(ControlConnection $c) => $c->alive())
 			->disposer(function(ControlConnection $c) { $c->removeAllListeners(); $c->close(); });
@@ -216,10 +214,10 @@ class Client extends EventEmitter
 	}
 
 	protected function connect(): PromiseInterface {
-		return (new Connector(['timeout' => $this->url->timeout], $this->loop))->connect($this->url->getSocketURL())
+		return (new Connector(['timeout' => $this->dsn->timeout], $this->loop))->connect($this->dsn->getSocketURL())
 			->then(fn(DuplexStreamInterface $connection) => new ControlConnection($connection, new ResponseParser(), new RecursiveSerializer()))
 			->then(function(ControlConnection $connection) {
-				if($credentials = $this->url->getCredentials())
+				if($credentials = $this->dsn->getCredentials())
 					return $connection->auth($credentials[1], $credentials[0])
 						->then(fn() => $connection, function(\Throwable $e) use($connection) {
 							$connection->close();
@@ -228,7 +226,7 @@ class Client extends EventEmitter
 				else
 					return resolve($connection);
 			})->then(function(ControlConnection $connection) {
-				if(($db = $this->url->database) >= 0)
+				if(($db = $this->dsn->database) >= 0)
 					return $connection->select($db)
 						->then(fn() => $connection, function(\Throwable $e) use($connection) {
 							$connection->close();

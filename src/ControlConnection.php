@@ -46,7 +46,7 @@ class ControlConnection extends EventEmitter implements ConnectionInterface
             $request->reject(new \BadMethodCallException('MONITOR command explicitly not supported (ENOTSUP)',
                 defined('SOCKET_EOPNOTSUPP') ? SOCKET_EOPNOTSUPP : 95));
         } else {
-            $this->io->write($this->serializer->getRequestMessage($command, $arguments));
+            $this->io->write($this->serializer->getRequestMessage($command, $arguments)); // FIXME drain & false rejection
 			$this->queue->enqueue($request);
         }
 

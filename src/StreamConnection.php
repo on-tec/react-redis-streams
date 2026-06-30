@@ -28,6 +28,7 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 		$this->queue = new \SplQueue();
 		$this->settings->durable() and $this->lastRetry = Carbon::now('UTC'); // Use cursor = 0 for first pending iteration.
 		$io->on('data', fn(mixed $data) => $this->data($data));
+		$io->on('drain', fn() => $this->drain());
 		$io->on('close', fn() => $this->close());
 		$this->idle();
 	}
@@ -127,8 +128,8 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 
 	protected function execute(RedisRequest $request, $queue = false) {
 		#debug_log("{$request->command} ".implode(' ', $request->arguments));
-		$this->io->write($this->serializer->getRequestMessage($request->command, $request->arguments));
-		$queue and $this->queue->enqueue($request);
+		$this->io->write($this->serializer->getRequestMessage($request->command, $request->arguments)); // FIXME handle false result & drain event.
+		$queue and $this->queue->enqueue($request); // FIXME Don't enqueue if result is false.
 	}
 
 	protected function data(mixed $data): void {
@@ -137,7 +138,7 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 			foreach($responses as $data)
 				try { $this->handle($data); }
 				catch(\Throwable $e) { $this->emit('error', [$e]); } // Operation or event error.
-			if(!$this->ending && $this->queue->isEmpty())
+			if(!$this->ending && $this->queue->isEmpty()) // FIXME Replace ending to alive?
 				$this->idle(); // Idle call could be moved into future tick if call stack grows.
 		} catch(\Throwable $e) {
 			$this->emit('error', [$e instanceof ParserException ? new InvalidDataException($e) : $e]);
@@ -145,6 +146,10 @@ class StreamConnection extends EventEmitter implements ConnectionInterface
 		}
 
 		$this->ending and $this->close();
+	}
+
+	protected function drain(): void {
+		// FIXME check & idle()
 	}
 
 	protected function handle(ModelInterface $response): void {

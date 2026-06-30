@@ -2,13 +2,14 @@
 
 use function \React\Async\await;
 use \Carbon\CarbonInterval;
+use \Ontec\ReactRedisStreams\RedisURL;
 use \Ontec\ReactRedisStreams\Client;
 use \Ontec\ReactRedisStreams\Entry;
 
 list('URL' => $url, 'STREAM' => $stream, 'GROUP' => $group, 'CONSUMER' => $consumer) = $_ENV;
 
 test('Redis connect', function() use($url) {
-	$redis = new Client($url, React\EventLoop\Loop::get());
+	$redis = new Client(new RedisURL($url), React\EventLoop\Loop::get());
 	expect(await($redis->ping()))->toBe('PONG');
 	return $redis;
 });
