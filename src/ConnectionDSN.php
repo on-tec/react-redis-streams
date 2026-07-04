@@ -20,7 +20,7 @@ class ConnectionDSN
 		$this->username = $username ?: '';
 		$this->password = $password ?: '';
 		$this->database = $database ?: -1;
-		$this->timeout = $timeout >= 0 ? $timeout : ini_get('default_socket_timeout');
+		$this->timeout = floatval(!is_null($timeout) && $timeout >= 0 ? $timeout : ini_get('default_socket_timeout'));
 		$this->decay = $decay ?: 0;
 	}
 
