@@ -12,9 +12,9 @@ class ConnectionDSN
 	public readonly float $timeout;
 	public readonly float $decay;
 
-	public function __construct(?string $hostname, ?int $port,
-								?string $username, ?string $password,
-								?int $database, ?float $timeout, ?float $decay) {
+	public function __construct(?string $hostname = null, ?int $port = null,
+								?string $username = null, ?string $password = null,
+								?int $database = null, ?float $timeout = null, ?float $decay = null) {
 		$this->hostname = $hostname ?: 'localhost';
 		$this->port = $port ?: 6379;
 		$this->username = $username ?: '';
