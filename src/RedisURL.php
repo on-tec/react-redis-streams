@@ -25,13 +25,13 @@ final class RedisURL extends ConnectionDSN
 		parent::__construct(
 			hostname: $hostname,
 			port: intval($url['port'] ?? 6379),
-			username: $this->urlDecode($url['user'] ?? null) ?: ($query['username'] ?? null) ?: '',
-			password: $this->urlDecode($url['pass'] ?? null) ?: ($query['password'] ?? null) ?: '',
+			username: $this->urlDecode($url['user'] ?? null) ?: ($query['username'] ?? null),
+			password: $this->urlDecode($url['pass'] ?? null) ?: ($query['password'] ?? null),
 			database: match(true) {
 				is_numeric($path) => intval($path),
 				isset($query['db']) => intval($query['db']),
 				isset($query['database']) => intval($query['database']),
-				default => -1
+				default => null
 			},
 			timeout: floatval($query['timeout'] ?? -1),
 			decay: floatval($query['decay'] ?? 0));

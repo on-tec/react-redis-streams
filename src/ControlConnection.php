@@ -28,8 +28,8 @@ class ControlConnection extends EventEmitter implements ConnectionInterface
 		$io->on('close', fn() => $this->close());
 	}
 
-	public function auth(string $password, ?string $username = null): PromiseInterface {
-		return is_null($username) ? $this->__call('auth', [$password]) : $this->__call('auth', [$password, $username]);
+	public function auth(string $password, string $username = ''): PromiseInterface {
+		return filled($username) ? $this->__call('auth', [$username, $password]) : $this->__call('auth', [$password]);
 	}
 
 	public function alive(): bool {
