@@ -9,8 +9,9 @@ final class RedisURL extends ConnectionDSN
 	public function __construct(protected string $url) {
 		if(!preg_match('#^([A-Za-z][0-9A-Za-z+\-.]*)://#', $url))
 			$url = (str_starts_with($url, '/') ? 'redis+unix://' : 'redis://').$url;
-		if(str_starts_with($url, 'redis+unix:///'))
-			$url = substr_replace($url, 'localhost', strlen('redis+unix://') - 1, 0);
+		str_starts_with($url, 'redis+unix:///') and $url = substr_replace($url, 'localhost', strlen('redis+unix://') - 1, 0);
+		str_starts_with($url, 'tcp://') and $url = substr_replace($url, 'redis://', 0, strlen('tcp://'));
+		str_starts_with($url, 'tls://') and $url = substr_replace($url, 'rediss://', 0, strlen('tls://'));
 
 		$url = parse_url($url);
 		if(!in_array($this->scheme = $url['scheme'] ?? null, ['redis', 'rediss', 'redis+unix']))
